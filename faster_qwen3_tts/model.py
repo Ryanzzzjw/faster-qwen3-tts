@@ -5,6 +5,7 @@ Wrapper class that provides a Qwen3-TTS API while using
 CUDA graphs for 6-10x speedup.
 """
 import logging
+import os
 from pathlib import Path
 from typing import Generator, Optional, Tuple, Union
 
@@ -17,6 +18,59 @@ from .utils import suppress_flash_attn_warning
 logger = logging.getLogger(__name__)
 
 
+def _resolve_to_local_snapshot(model_name: str) -> str:
+    """Resolve a HuggingFace Hub model ID to its local snapshot path.
+
+    When ``HF_HUB_OFFLINE=1`` is set (or ``TRANSFORMERS_OFFLINE=1``), passing
+    a Hub ID like ``"Qwen/Qwen3-TTS-12Hz-1.7B-Base"`` causes some
+    ``transformers`` code-paths to attempt network requests that are then
+    blocked.  Resolving the ID to the concrete snapshot directory on disk
+    makes ``transformers`` treat it as a local model and skip those calls.
+
+    If the model is already a local path or the snapshot cannot be found, the
+    original *model_name* is returned unchanged.
+    """
+    # Only needed when offline mode is active.
+    offline = (
+        os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+        or os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
+    )
+    if not offline:
+        return model_name
+
+    # Already a local path — nothing to resolve.
+    if os.path.isdir(model_name):
+        return model_name
+
+    # Locate the HF hub cache directory.
+    hf_home = os.environ.get(
+        "HF_HOME", os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+    )
+    cache_dir = os.environ.get("HF_HUB_CACHE", os.path.join(hf_home, "hub"))
+
+    # Hub ID → cache dir name: "Qwen/Qwen3-TTS" → "models--Qwen--Qwen3-TTS"
+    model_dir = os.path.join(cache_dir, "models--" + model_name.replace("/", "--"))
+    refs_path = os.path.join(model_dir, "refs", "main")
+
+    if not os.path.exists(refs_path):
+        logger.warning(
+            "Offline mode: could not find refs/main for %s in %s",
+            model_name, cache_dir,
+        )
+        return model_name
+
+    with open(refs_path) as f:
+        commit_hash = f.read().strip()
+
+    snapshot_path = os.path.join(model_dir, "snapshots", commit_hash)
+    if not os.path.isdir(snapshot_path):
+        logger.warning(
+            "Offline mode: snapshot dir does not exist: %s", snapshot_path
+        )
+        return model_name
+
+    logger.info("Offline mode: resolved %s → %s", model_name, snapshot_path)
+    return snapshot_path
 
 
 class FasterQwen3TTS:
@@ -96,8 +150,11 @@ class FasterQwen3TTS:
         if not device.startswith("cuda") or not torch.cuda.is_available():
             raise ValueError("CUDA graphs require CUDA device")
         
+        # Resolve Hub ID to local snapshot path for offline mode.
+        model_name = _resolve_to_local_snapshot(model_name)
+
         logger.info(f"Loading Qwen3-TTS model: {model_name}")
-        
+
         # Import here to avoid dependency issues (and suppress flash-attn warning)
         with suppress_flash_attn_warning():
             from qwen_tts import Qwen3TTSModel
