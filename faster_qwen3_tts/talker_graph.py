@@ -25,7 +25,7 @@ class TalkerGraph:
     """
 
     def __init__(self, talker_model, talker_config, device='cuda', dtype=torch.bfloat16,
-                 max_seq_len=512):
+                 max_seq_len=2048):
         self.device = device
         device_index = torch.device(device).index
         device_index = device_index if device_index is not None else torch.cuda.current_device()

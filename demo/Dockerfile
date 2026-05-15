@@ -3,7 +3,7 @@ FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV MODEL_CACHE_SIZE=5
-ENV ACTIVE_MODELS=Qwen/Qwen3-TTS-12Hz-1.7B-Base
+ENV ACTIVE_MODELS=Qwen/Qwen3-TTS-12Hz-1.7B-Base,Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
 ENV HOME=/tmp
 ENV TORCHINDUCTOR_CACHE_DIR=/tmp/torch_inductor
 # Well-known mount point for HuggingFace hub cache.
@@ -26,4 +26,4 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip \
     && python3 -m pip install --no-cache-dir -r demo/requirements.txt
 
 EXPOSE 7860
-CMD ["python3", "demo/server.py", "--host", "0.0.0.0"]
+CMD ["python3", "demo/server.py", "--host", "0.0.0.0", "--model", "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"]

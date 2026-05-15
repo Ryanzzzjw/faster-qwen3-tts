@@ -408,7 +408,7 @@ async def generate_stream(
                     temperature=temperature,
                     top_k=top_k,
                     repetition_penalty=repetition_penalty,
-                    max_new_tokens=360,  # cap at 30s (12 Hz codec)
+                    max_new_tokens=1800,  # cap at 30s (12 Hz codec)
                 )
             elif mode == "custom":
                 if not speaker:
@@ -423,7 +423,7 @@ async def generate_stream(
                     temperature=temperature,
                     top_k=top_k,
                     repetition_penalty=repetition_penalty,
-                    max_new_tokens=360,
+                    max_new_tokens=1800,
                 )
             else:
                 gen = model.generate_voice_design_streaming(
