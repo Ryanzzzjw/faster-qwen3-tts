@@ -134,6 +134,15 @@ class FasterQwen3TTS:
             return 24000
 
         return int(sample_rate)
+
+    @staticmethod
+    def _resolve_non_streaming_mode(
+        non_streaming_mode: Optional[bool],
+        *,
+        default: bool,
+    ) -> bool:
+        """Treat None as the method-specific upstream default."""
+        return default if non_streaming_mode is None else non_streaming_mode
         
     @classmethod
     def from_pretrained(
@@ -525,6 +534,7 @@ class FasterQwen3TTS:
         language: str,
         speaker: Optional[str],
         instruct: Optional[str] = None,
+        non_streaming_mode: bool = True,
     ):
         input_texts = [self.model._build_assistant_text(text)]
         input_ids = self.model._tokenize_texts(input_texts)
@@ -543,7 +553,7 @@ class FasterQwen3TTS:
             voice_clone_prompt=None,
             languages=[language] if language is not None else ["Auto"],
             speakers=[speaker],
-            non_streaming_mode=False,
+            non_streaming_mode=non_streaming_mode,
             instruct_ids=instruct_ids,
         )
 
@@ -795,7 +805,7 @@ class FasterQwen3TTS:
         do_sample: bool = True,
         repetition_penalty: float = 1.05,
         xvec_only: bool = False,
-        non_streaming_mode: bool = False,
+        non_streaming_mode: Optional[bool] = None,
         append_silence: bool = True,
         instruct: Optional[str] = None,
         voice_clone_prompt: Optional[Union[Dict[str, Any], List[Any]]] = None,
@@ -819,8 +829,9 @@ class FasterQwen3TTS:
                 This prevents phoneme bleed-through from the reference and allows clean
                 language switching. Default False to match upstream ICL behavior
                 (reference audio in context).
-            non_streaming_mode: Match upstream text-feeding layout. Default False to match
-                upstream step-by-step text feeding during decode.
+            non_streaming_mode: Match upstream text-feeding layout. When None, use the
+                upstream voice-cloning default (False, step-by-step text feeding during
+                decode). Set True to prefill the full target text before decode.
             voice_clone_prompt: Optional precomputed voice clone prompt dict. When provided,
                 `xvec_only` is ignored and prompt extraction from `ref_audio` is skipped.
                 This path supports x-vector-only prompts (`ref_spk_embedding` only)
@@ -834,6 +845,11 @@ class FasterQwen3TTS:
             Tuple of ([audio_waveform], sample_rate)
         """
         from .generate import fast_generate
+
+        non_streaming_mode = self._resolve_non_streaming_mode(
+            non_streaming_mode,
+            default=False,
+        )
 
         m, talker, config, tie, tam, tth, tpe, ref_codes = self._prepare_generation(
             text=text,
@@ -921,7 +937,7 @@ class FasterQwen3TTS:
         repetition_penalty: float = 1.05,
         chunk_size: int = 12,
         xvec_only: bool = False,
-        non_streaming_mode: bool = False,
+        non_streaming_mode: Optional[bool] = None,
         append_silence: bool = True,
         parity_mode: bool = False,
         instruct: Optional[str] = None,
@@ -950,8 +966,9 @@ class FasterQwen3TTS:
                 This prevents phoneme bleed-through from the reference and allows clean
                 language switching. Default False to match upstream ICL behavior
                 (reference audio in context).
-            non_streaming_mode: Default False to match upstream text feeding during decode.
-                Set to True to prefill the full target text before streaming decode.
+            non_streaming_mode: When None, use the upstream voice-cloning default
+                (False, step-by-step text feeding during decode). Set to True to
+                prefill the full target text before streaming decode.
             parity_mode: When True, disables CUDA graphs and uses dynamic cache streaming.
             voice_clone_prompt: Optional precomputed voice clone prompt dict. When provided,
                 `xvec_only` is ignored and prompt extraction from `ref_audio` is skipped.
@@ -966,6 +983,11 @@ class FasterQwen3TTS:
             Tuple of (audio_chunk_numpy, sample_rate, timing_dict)
         """
         from .streaming import fast_generate_streaming, parity_generate_streaming
+
+        non_streaming_mode = self._resolve_non_streaming_mode(
+            non_streaming_mode,
+            default=False,
+        )
 
         m, talker, config, tie, tam, tth, tpe, ref_codes = self._prepare_generation(
             text=text,
@@ -1079,6 +1101,7 @@ class FasterQwen3TTS:
         speaker: str,
         language: str,
         instruct: Optional[str] = None,
+        non_streaming_mode: Optional[bool] = None,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1093,6 +1116,11 @@ class FasterQwen3TTS:
         self.model._validate_languages([language])
         self.model._validate_speakers([speaker])
 
+        non_streaming_mode = self._resolve_non_streaming_mode(
+            non_streaming_mode,
+            default=True,
+        )
+
         if self.model.model.tts_model_size in "0b6":
             instruct = None
 
@@ -1103,6 +1131,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=speaker,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         codec_ids, timing = fast_generate(
@@ -1156,6 +1185,7 @@ class FasterQwen3TTS:
         speaker: str,
         language: str,
         instruct: Optional[str] = None,
+        non_streaming_mode: Optional[bool] = None,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1171,6 +1201,11 @@ class FasterQwen3TTS:
         self.model._validate_languages([language])
         self.model._validate_speakers([speaker])
 
+        non_streaming_mode = self._resolve_non_streaming_mode(
+            non_streaming_mode,
+            default=True,
+        )
+
         if self.model.model.tts_model_size in "0b6":
             instruct = None
 
@@ -1181,6 +1216,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=speaker,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         speech_tokenizer = m.speech_tokenizer
@@ -1253,6 +1289,7 @@ class FasterQwen3TTS:
         text: str,
         instruct: str,
         language: str,
+        non_streaming_mode: Optional[bool] = None,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1266,6 +1303,11 @@ class FasterQwen3TTS:
 
         self.model._validate_languages([language])
 
+        non_streaming_mode = self._resolve_non_streaming_mode(
+            non_streaming_mode,
+            default=True,
+        )
+
         from .generate import fast_generate
 
         m, talker, config, tie, tam, tth, tpe = self._prepare_generation_custom(
@@ -1273,6 +1315,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=None,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         codec_ids, timing = fast_generate(
@@ -1325,6 +1368,7 @@ class FasterQwen3TTS:
         text: str,
         instruct: str,
         language: str,
+        non_streaming_mode: Optional[bool] = None,
         max_new_tokens: int = 2048,
         min_new_tokens: int = 2,
         temperature: float = 0.9,
@@ -1339,6 +1383,11 @@ class FasterQwen3TTS:
 
         self.model._validate_languages([language])
 
+        non_streaming_mode = self._resolve_non_streaming_mode(
+            non_streaming_mode,
+            default=True,
+        )
+
         from .streaming import fast_generate_streaming
 
         m, talker, config, tie, tam, tth, tpe = self._prepare_generation_custom(
@@ -1346,6 +1395,7 @@ class FasterQwen3TTS:
             language=language,
             speaker=None,
             instruct=instruct,
+            non_streaming_mode=non_streaming_mode,
         )
 
         speech_tokenizer = m.speech_tokenizer
