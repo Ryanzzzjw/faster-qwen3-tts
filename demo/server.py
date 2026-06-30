@@ -72,7 +72,7 @@ PRESET_REFS = [
 
 _GITHUB_RAW = "https://raw.githubusercontent.com/andimarafioti/faster-qwen3-tts/main"
 _PRESET_REMOTE = {
-    "ref_audio":   f"{_GITHUB_RAW}/ref_audio.wav",
+    "ref_audio": f"{_GITHUB_RAW}/ref_audio.wav",
     "ref_audio_2": f"{_GITHUB_RAW}/ref_audio_2.wav",
     "ref_audio_3": f"{_GITHUB_RAW}/ref_audio_3.wav",
 }
@@ -82,6 +82,7 @@ _TRANSCRIPT_REMOTE = f"{_GITHUB_RAW}/samples/parity/icl_transcripts.txt"
 def _fetch_preset_assets() -> None:
     """Download preset wav files and transcripts from GitHub if not present locally."""
     import urllib.request
+
     _ASSET_DIR.mkdir(parents=True, exist_ok=True)
     PRESET_TRANSCRIPTS.parent.mkdir(parents=True, exist_ok=True)
     if not PRESET_TRANSCRIPTS.exists():
@@ -96,6 +97,7 @@ def _fetch_preset_assets() -> None:
                 print(f"Downloaded {path.name}")
             except Exception as e:
                 print(f"Warning: could not fetch {key}: {e}")
+
 
 _preset_refs: dict[str, dict] = {}
 
@@ -149,6 +151,7 @@ def _prime_preset_voice_cache(model: FasterQwen3TTS) -> None:
             except Exception:
                 continue
 
+
 app = FastAPI(title="Faster Qwen3-TTS Demo")
 app.add_middleware(
     CORSMiddleware,
@@ -166,6 +169,8 @@ _ref_cache_lock = threading.Lock()
 _parakeet = None
 _generation_lock = asyncio.Lock()
 _generation_waiters: int = 0  # requests waiting for or holding the generation lock
+_current_generation_cancel: threading.Event | None = None
+_current_generation_cancel_lock = threading.Lock()
 
 # Guard against inputs that would overflow the static KV cache (max_seq_len=2048).
 # At ~3-4 chars/token for English the overhead of system/ref tokens leaves room
@@ -180,6 +185,26 @@ _AUDIO_TOO_LARGE_MSG = (
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _cancel_current_generation() -> None:
+    with _current_generation_cancel_lock:
+        if _current_generation_cancel is not None:
+            _current_generation_cancel.set()
+
+
+def _set_current_generation_cancel(cancel_event: threading.Event) -> None:
+    global _current_generation_cancel
+    with _current_generation_cancel_lock:
+        _current_generation_cancel = cancel_event
+
+
+def _clear_current_generation_cancel(cancel_event: threading.Event) -> None:
+    global _current_generation_cancel
+    with _current_generation_cancel_lock:
+        if _current_generation_cancel is cancel_event:
+            _current_generation_cancel = None
+
 
 def _to_wav_b64(audio: np.ndarray, sr: int) -> str:
     if audio.dtype != np.float32:
@@ -197,6 +222,7 @@ def _concat_audio(audio_list) -> np.ndarray:
         return audio_list.astype(np.float32).squeeze()
     parts = [np.array(a, dtype=np.float32).squeeze() for a in audio_list if len(a) > 0]
     return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+
 
 def _get_cached_ref_path(content: bytes) -> str:
     digest = hashlib.sha1(content).hexdigest()
@@ -220,6 +246,7 @@ def _default_non_streaming_mode_for_mode(mode: str) -> bool:
 
 _fetch_preset_assets()
 _load_preset_refs()
+
 
 @app.get("/")
 async def root():
@@ -245,7 +272,9 @@ async def transcribe_audio(audio: UploadFile = File(...)):
             wav = wav.mean(axis=1)
         wav_t = torch.from_numpy(wav)
         if sr != 16000:
-            wav_t = torchaudio.functional.resample(wav_t.unsqueeze(0), sr, 16000).squeeze(0)
+            wav_t = torchaudio.functional.resample(
+                wav_t.unsqueeze(0), sr, 16000
+            ).squeeze(0)
         return _parakeet.transcribe(wav_t.cuda())
 
     text = await asyncio.to_thread(run)
@@ -351,7 +380,9 @@ async def generate_stream(
     ref_audio: UploadFile = File(None),
 ):
     if not _active_model_name or _active_model_name not in _model_cache:
-        raise HTTPException(status_code=400, detail="Model not loaded. Click 'Load' first.")
+        raise HTTPException(
+            status_code=400, detail="Model not loaded. Click 'Load' first."
+        )
     if len(text) > MAX_TEXT_CHARS:
         raise HTTPException(
             status_code=400,
@@ -382,8 +413,10 @@ async def generate_stream(
 
     loop = asyncio.get_event_loop()
     queue: asyncio.Queue[str | None] = asyncio.Queue()
+    cancel_event = threading.Event()
 
     def run_generation():
+        gen = None
         try:
             # Resolve the model after the generation lock is held so we always
             # use the currently active model, not a stale reference captured
@@ -446,11 +479,13 @@ async def generate_stream(
             # Prime generator to capture wall-clock time to first chunk
             first_audio = next(gen, None)
             if first_audio is not None:
+                if cancel_event.is_set():
+                    return
                 audio_chunk, sr, timing = first_audio
                 wall_first_ms = (time.perf_counter() - t0) * 1000
                 model_ms = timing.get("prefill_ms", 0) + timing.get("decode_ms", 0)
                 voice_clone_ms = max(0.0, wall_first_ms - model_ms)
-                total_gen_ms += timing.get('prefill_ms', 0) + timing.get('decode_ms', 0)
+                total_gen_ms += timing.get("prefill_ms", 0) + timing.get("decode_ms", 0)
                 if ttfa_ms is None:
                     ttfa_ms = total_gen_ms
 
@@ -473,8 +508,11 @@ async def generate_stream(
                 loop.call_soon_threadsafe(queue.put_nowait, json.dumps(payload))
 
             for audio_chunk, sr, timing in gen:
+                if cancel_event.is_set():
+                    break
+
                 # prefill_ms is non-zero only on the first chunk
-                total_gen_ms += timing.get('prefill_ms', 0) + timing.get('decode_ms', 0)
+                total_gen_ms += timing.get("prefill_ms", 0) + timing.get("decode_ms", 0)
                 if ttfa_ms is None:
                     ttfa_ms = total_gen_ms  # already in ms
 
@@ -496,22 +534,30 @@ async def generate_stream(
                 }
                 loop.call_soon_threadsafe(queue.put_nowait, json.dumps(payload))
 
-            rtf = total_audio_s / (total_gen_ms / 1000) if total_gen_ms > 0 else 0.0
-            done_payload = {
-                "type": "done",
-                "ttfa_ms": round(ttfa_ms) if ttfa_ms else 0,
-                "voice_clone_ms": round(voice_clone_ms),
-                "rtf": round(rtf, 3),
-                "total_audio_s": round(total_audio_s, 3),
-                "total_ms": round((time.perf_counter() - t0) * 1000),
-            }
-            loop.call_soon_threadsafe(queue.put_nowait, json.dumps(done_payload))
+            if cancel_event.is_set():
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, json.dumps({"type": "cancelled"})
+                )
+            else:
+                rtf = total_audio_s / (total_gen_ms / 1000) if total_gen_ms > 0 else 0.0
+                done_payload = {
+                    "type": "done",
+                    "ttfa_ms": round(ttfa_ms) if ttfa_ms else 0,
+                    "voice_clone_ms": round(voice_clone_ms),
+                    "rtf": round(rtf, 3),
+                    "total_audio_s": round(total_audio_s, 3),
+                    "total_ms": round((time.perf_counter() - t0) * 1000),
+                }
+                loop.call_soon_threadsafe(queue.put_nowait, json.dumps(done_payload))
 
         except Exception as e:
             import traceback
+
             err = {"type": "error", "message": str(e), "detail": traceback.format_exc()}
             loop.call_soon_threadsafe(queue.put_nowait, json.dumps(err))
         finally:
+            if gen is not None:
+                gen.close()
             loop.call_soon_threadsafe(queue.put_nowait, None)
             if tmp_path and os.path.exists(tmp_path) and not tmp_is_cached:
                 os.unlink(tmp_path)
@@ -519,7 +565,9 @@ async def generate_stream(
     async def sse():
         global _generation_waiters
         lock_acquired = False
+        thread: threading.Thread | None = None
         _generation_waiters += 1
+        _cancel_current_generation()
         people_ahead = _generation_waiters - 1 + (1 if _generation_lock.locked() else 0)
         try:
             if people_ahead > 0:
@@ -528,6 +576,7 @@ async def generate_stream(
             await _generation_lock.acquire()
             lock_acquired = True
             _generation_waiters -= 1
+            _set_current_generation_cancel(cancel_event)
 
             thread = threading.Thread(target=run_generation, daemon=True)
             thread.start()
@@ -538,9 +587,13 @@ async def generate_stream(
                     break
                 yield f"data: {msg}\n\n"
         except asyncio.CancelledError:
-            pass
+            cancel_event.set()
         finally:
+            cancel_event.set()
+            if thread is not None and thread.is_alive():
+                await asyncio.to_thread(thread.join)
             if lock_acquired:
+                _clear_current_generation_cancel(cancel_event)
                 _generation_lock.release()
             else:
                 _generation_waiters -= 1
@@ -550,8 +603,6 @@ async def generate_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
 
 
 @app.post("/generate")
@@ -571,7 +622,9 @@ async def generate_non_streaming(
     ref_audio: UploadFile = File(None),
 ):
     if not _active_model_name or _active_model_name not in _model_cache:
-        raise HTTPException(status_code=400, detail="Model not loaded. Click 'Load' first.")
+        raise HTTPException(
+            status_code=400, detail="Model not loaded. Click 'Load' first."
+        )
     if len(text) > MAX_TEXT_CHARS:
         raise HTTPException(
             status_code=400,
@@ -658,15 +711,17 @@ async def generate_non_streaming(
         _generation_waiters -= 1
         audio, sr, elapsed, dur = await asyncio.to_thread(run)
         rtf = dur / elapsed if elapsed > 0 else 0.0
-        return JSONResponse({
-            "audio_b64": _to_wav_b64(audio, sr),
-            "sample_rate": sr,
-            "metrics": {
-                "total_ms": round(elapsed * 1000),
-                "audio_duration_s": round(dur, 3),
-                "rtf": round(rtf, 3),
-            },
-        })
+        return JSONResponse(
+            {
+                "audio_b64": _to_wav_b64(audio, sr),
+                "sample_rate": sr,
+                "metrics": {
+                    "total_ms": round(elapsed * 1000),
+                    "audio_duration_s": round(dur, 3),
+                    "rtf": round(rtf, 3),
+                },
+            }
+        )
     finally:
         if lock_acquired:
             _generation_lock.release()
@@ -677,6 +732,7 @@ async def generate_non_streaming(
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(description="Faster Qwen3-TTS Demo Server")
