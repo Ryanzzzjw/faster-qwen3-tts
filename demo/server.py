@@ -171,6 +171,7 @@ _generation_lock = asyncio.Lock()
 _generation_waiters: int = 0  # requests waiting for or holding the generation lock
 _current_generation_cancel: threading.Event | None = None
 _current_generation_cancel_lock = threading.Lock()
+_stream_cleanup_tasks: set[asyncio.Task] = set()
 
 # Guard against inputs that would overflow the static KV cache (max_seq_len=2048).
 # At ~3-4 chars/token for English the overhead of system/ref tokens leaves room
@@ -566,6 +567,24 @@ async def generate_stream(
         global _generation_waiters
         lock_acquired = False
         thread: threading.Thread | None = None
+
+        async def finish_generation_cleanup() -> None:
+            global _generation_waiters
+            nonlocal lock_acquired
+            if thread is not None and thread.is_alive():
+                await asyncio.to_thread(thread.join)
+            if lock_acquired:
+                _clear_current_generation_cancel(cancel_event)
+                _generation_lock.release()
+                lock_acquired = False
+            else:
+                _generation_waiters -= 1
+
+        def cleanup_done(task: asyncio.Task) -> None:
+            _stream_cleanup_tasks.discard(task)
+            if not task.cancelled():
+                task.exception()
+
         _generation_waiters += 1
         _cancel_current_generation()
         people_ahead = _generation_waiters - 1 + (1 if _generation_lock.locked() else 0)
@@ -590,13 +609,10 @@ async def generate_stream(
             cancel_event.set()
         finally:
             cancel_event.set()
-            if thread is not None and thread.is_alive():
-                await asyncio.to_thread(thread.join)
-            if lock_acquired:
-                _clear_current_generation_cancel(cancel_event)
-                _generation_lock.release()
-            else:
-                _generation_waiters -= 1
+            cleanup_task = asyncio.create_task(finish_generation_cleanup())
+            _stream_cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(cleanup_done)
+            await asyncio.shield(cleanup_task)
 
     return StreamingResponse(
         sse(),
