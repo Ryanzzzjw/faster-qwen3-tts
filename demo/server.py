@@ -65,6 +65,7 @@ BASE_DIR = Path(__file__).resolve().parent
 _ASSET_DIR = Path(os.environ.get("ASSET_DIR", "/tmp/faster-qwen3-tts-assets"))
 PRESET_TRANSCRIPTS = _ASSET_DIR / "samples" / "parity" / "icl_transcripts.txt"
 PRESET_REFS = [
+    ("ref_audio_keli", _ASSET_DIR / "keli.wav", "Clone 0"),
     ("ref_audio_3", _ASSET_DIR / "ref_audio_3.wav", "Clone 1"),
     ("ref_audio_2", _ASSET_DIR / "ref_audio_2.wav", "Clone 2"),
     ("ref_audio", _ASSET_DIR / "ref_audio.wav", "Clone 3"),
